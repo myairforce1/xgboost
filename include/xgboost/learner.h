@@ -9,12 +9,11 @@
 #define XGBOOST_LEARNER_H_
 
 #include <rabit/rabit.h>
-
 #include <xgboost/base.h>
-#include <xgboost/gbm.h>
-#include <xgboost/metric.h>
-#include <xgboost/objective.h>
+#include <xgboost/feature_map.h>
 #include <xgboost/generic_parameters.h>
+#include <xgboost/host_device_vector.h>
+#include <xgboost/model.h>
 
 #include <utility>
 #include <map>
@@ -23,6 +22,13 @@
 #include <vector>
 
 namespace xgboost {
+
+class Metric;
+class GradientBooster;
+class ObjFunction;
+class DMatrix;
+class Json;
+
 /*!
  * \brief Learner class that does training and prediction.
  *  This is the user facing module of xgboost training.
@@ -39,40 +45,14 @@ namespace xgboost {
  *
  *  \endcode
  */
-class Learner : public rabit::Serializable {
+class Learner : public Model, public Configurable, public rabit::Serializable {
  public:
   /*! \brief virtual destructor */
-  ~Learner() override = default;
+  ~Learner() override;
   /*!
-   * \brief set configuration from pair iterators.
-   * \param begin The beginning iterator.
-   * \param end The end iterator.
-   * \tparam PairIter iterator<std::pair<std::string, std::string> >
+   * \brief Configure Learner based on set parameters.
    */
-  template<typename PairIter>
-  inline void Configure(PairIter begin, PairIter end);
-  /*!
-   * \brief Set the configuration of gradient boosting.
-   *  User must call configure once before InitModel and Training.
-   *
-   * \param cfg configurations on both training and model parameters.
-   */
-  virtual void Configure(const std::vector<std::pair<std::string, std::string> >& cfg) = 0;
-  /*!
-   * \brief Initialize the model using the specified configurations via Configure.
-   *  An model have to be either Loaded or initialized before Update/Predict/Save can be called.
-   */
-  virtual void InitModel() = 0;
-  /*!
-   * \brief load model from stream
-   * \param fi input stream.
-   */
-  void Load(dmlc::Stream* fi) override = 0;
-  /*!
-   * \brief save model to stream.
-   * \param fo output stream
-   */
-  void Save(dmlc::Stream* fo) const override = 0;
+  virtual void Configure() = 0;
   /*!
    * \brief update the model for one iteration
    *  With the specified objective function.
@@ -116,14 +96,39 @@ class Learner : public rabit::Serializable {
                        bool output_margin,
                        HostDeviceVector<bst_float> *out_preds,
                        unsigned ntree_limit = 0,
+                       bool training = false,
                        bool pred_leaf = false,
                        bool pred_contribs = false,
                        bool approx_contribs = false,
                        bool pred_interactions = false) = 0;
 
+  void LoadModel(Json const& in) override = 0;
+  void SaveModel(Json* out) const override = 0;
+
+  virtual void LoadModel(dmlc::Stream* fi) = 0;
+  virtual void SaveModel(dmlc::Stream* fo) const = 0;
+
+  /*!
+   * \brief Set multiple parameters at once.
+   *
+   * \param args parameters.
+   */
+  virtual void SetParams(Args const& args) = 0;
+  /*!
+   * \brief Set parameter for booster
+   *
+   *  The property will NOT be saved along with booster
+   *
+   * \param key   The key of parameter
+   * \param value The value of parameter
+   */
+  virtual void SetParam(const std::string& key, const std::string& value) = 0;
+
   /*!
    * \brief Set additional attribute to the Booster.
+   *
    *  The property will be saved along the booster.
+   *
    * \param key The key of the property.
    * \param value The value of the property.
    */
@@ -147,8 +152,6 @@ class Learner : public rabit::Serializable {
    * \return vector of attribute name strings.
    */
   virtual std::vector<std::string> GetAttrNames() const = 0;
-
-  virtual LearnerTrainParam const& GetLearnerTrainParameter() const = 0;
   /*!
    * \return whether the model allow lazy checkpoint in rabit.
    */
@@ -160,24 +163,9 @@ class Learner : public rabit::Serializable {
    * \param format the format to dump the model in
    * \return a vector of dump for boosters.
    */
-  std::vector<std::string> DumpModel(const FeatureMap& fmap,
-                                     bool with_stats,
-                                     std::string format) const;
-  /*!
-   * \brief online prediction function, predict score for one instance at a time
-   *  NOTE: use the batch prediction interface if possible, batch prediction is usually
-   *        more efficient than online prediction
-   *        This function is NOT threadsafe, make sure you only call from one thread.
-   *
-   * \param inst the instance you want to predict
-   * \param output_margin whether to only predict margin value instead of transformed prediction
-   * \param out_preds output vector to hold the predictions
-   * \param ntree_limit limit the number of trees used in prediction
-   */
-  inline void Predict(const SparsePage::Inst &inst,
-                      bool output_margin,
-                      HostDeviceVector<bst_float> *out_preds,
-                      unsigned ntree_limit = 0) const;
+  virtual std::vector<std::string> DumpModel(const FeatureMap& fmap,
+                                             bool with_stats,
+                                             std::string format) const = 0;
   /*!
    * \brief Create a new instance of learner.
    * \param cache_data The matrix to cache the prediction.
@@ -185,6 +173,7 @@ class Learner : public rabit::Serializable {
    */
   static Learner* Create(const std::vector<std::shared_ptr<DMatrix> >& cache_data);
 
+  virtual GenericParameter const& GetGenericParameter() const = 0;
   /*!
    * \brief Get configuration arguments currently stored by the learner
    * \return Key-value pairs representing configuration arguments
@@ -192,8 +181,6 @@ class Learner : public rabit::Serializable {
   virtual const std::map<std::string, std::string>& GetConfigurationArguments() const = 0;
 
  protected:
-  /*! \brief internal base score of the model */
-  bst_float base_score_;
   /*! \brief objective function */
   std::unique_ptr<ObjFunction> obj_;
   /*! \brief The gradient booster used by the model*/
@@ -201,26 +188,27 @@ class Learner : public rabit::Serializable {
   /*! \brief The evaluation metrics used to evaluate the model. */
   std::vector<std::unique_ptr<Metric> > metrics_;
   /*! \brief Training parameter. */
-  LearnerTrainParam tparam_;
+  GenericParameter generic_parameters_;
 };
 
-// implementation of inline functions.
-inline void Learner::Predict(const SparsePage::Inst& inst,
-                             bool output_margin,
-                             HostDeviceVector<bst_float>* out_preds,
-                             unsigned ntree_limit) const {
-  gbm_->PredictInstance(inst, &out_preds->HostVector(), ntree_limit);
-  if (!output_margin) {
-    obj_->PredTransform(out_preds);
-  }
-}
+struct LearnerModelParamLegacy;
 
-// implementing configure.
-template<typename PairIter>
-inline void Learner::Configure(PairIter begin, PairIter end) {
-  std::vector<std::pair<std::string, std::string> > vec(begin, end);
-  this->Configure(vec);
-}
+/*
+ * \brief Basic Model Parameters, used to describe the booster.
+ */
+struct LearnerModelParam {
+  /* \brief global bias */
+  bst_float base_score;
+  /* \brief number of features  */
+  uint32_t num_feature;
+  /* \brief number of classes, if it is multi-class classification  */
+  uint32_t num_output_group;
+
+  LearnerModelParam() : base_score {0.5}, num_feature{0}, num_output_group{0} {}
+  // As the old `LearnerModelParamLegacy` is still used by binary IO, we keep
+  // this one as an immutable copy.
+  LearnerModelParam(LearnerModelParamLegacy const& user_param, float base_margin);
+};
 
 }  // namespace xgboost
 #endif  // XGBOOST_LEARNER_H_

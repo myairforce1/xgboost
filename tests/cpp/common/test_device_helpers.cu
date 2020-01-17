@@ -10,17 +10,6 @@
 
 using xgboost::common::Span;
 
-struct Shard { int id; };
-
-TEST(DeviceHelpers, Basic) {
-  std::vector<Shard> shards (4);
-  for (int i = 0; i < 4; ++i) {
-    shards[i].id = i;
-  }
-  int sum = dh::ReduceShards<int>(&shards, [](Shard& s) { return s.id ; });
-  ASSERT_EQ(sum, 6);
-}
-
 void CreateTestData(xgboost::bst_uint num_rows, int max_row_size,
                     thrust::host_vector<int> *row_ptr,
                     thrust::host_vector<xgboost::bst_uint> *rows) {
@@ -96,19 +85,80 @@ TEST(bulkAllocator, Test) {
   TestAllocator();
 }
 
- // Test thread safe max reduction
-TEST(AllReducer, HostMaxAllReduce) {
-  dh::AllReducer reducer;
-  size_t num_threads = 50;
-  std::vector<std::vector<size_t>> thread_data(num_threads);
-#pragma omp parallel num_threads(num_threads)
-  {
-    int tid = omp_get_thread_num();
-    thread_data[tid] = {size_t(tid)};
-    reducer.HostMaxAllReduce(&thread_data[tid]);
-  }
+template <typename T, typename Comp = thrust::less<T>>
+void TestUpperBoundImpl(const std::vector<T> &vec, T val_to_find,
+                        const Comp &comp = Comp()) {
+  EXPECT_EQ(dh::UpperBound(vec.data(), vec.size(), val_to_find, comp),
+            std::upper_bound(vec.begin(), vec.end(), val_to_find, comp) - vec.begin());
+}
 
-  for (auto data : thread_data) {
-    ASSERT_EQ(data.front(), num_threads - 1);
-  }
+template <typename T, typename Comp = thrust::less<T>>
+void TestLowerBoundImpl(const std::vector<T> &vec, T val_to_find,
+                        const Comp &comp = Comp()) {
+  EXPECT_EQ(dh::LowerBound(vec.data(), vec.size(), val_to_find, comp),
+            std::lower_bound(vec.begin(), vec.end(), val_to_find, comp) - vec.begin());
+}
+
+TEST(UpperBound, DataAscending) {
+  std::vector<int> hvec{0, 3, 5, 5, 7, 8, 9, 10, 10};
+
+  // Test boundary conditions
+  TestUpperBoundImpl(hvec, hvec.front());  // Result 1
+  TestUpperBoundImpl(hvec, hvec.front() - 1);  // Result 0
+  TestUpperBoundImpl(hvec, hvec.back() + 1);  // Result hvec.size()
+  TestUpperBoundImpl(hvec, hvec.back());  // Result hvec.size()
+
+  // Test other values - both missing and present
+  TestUpperBoundImpl(hvec, 3);  // Result 2
+  TestUpperBoundImpl(hvec, 4);  // Result 2
+  TestUpperBoundImpl(hvec, 5);  // Result 4
+}
+
+TEST(UpperBound, DataDescending) {
+  std::vector<int> hvec{10, 10, 9, 8, 7, 5, 5, 3, 0, 0};
+  const auto &comparator = thrust::greater<int>();
+
+  // Test boundary conditions
+  TestUpperBoundImpl(hvec, hvec.front(), comparator);  // Result 2
+  TestUpperBoundImpl(hvec, hvec.front() + 1, comparator);  // Result 0
+  TestUpperBoundImpl(hvec, hvec.back(), comparator);  // Result hvec.size()
+  TestUpperBoundImpl(hvec, hvec.back() - 1, comparator);  // Result hvec.size()
+
+  // Test other values - both missing and present
+  TestUpperBoundImpl(hvec, 9, comparator);  // Result 3
+  TestUpperBoundImpl(hvec, 7, comparator);  // Result 5
+  TestUpperBoundImpl(hvec, 4, comparator);  // Result 7
+  TestUpperBoundImpl(hvec, 8, comparator);  // Result 4
+}
+
+TEST(LowerBound, DataAscending) {
+  std::vector<int> hvec{0, 3, 5, 5, 7, 8, 9, 10, 10};
+
+  // Test boundary conditions
+  TestLowerBoundImpl(hvec, hvec.front());  // Result 0
+  TestLowerBoundImpl(hvec, hvec.front() - 1);  // Result 0
+  TestLowerBoundImpl(hvec, hvec.back());  // Result 7
+  TestLowerBoundImpl(hvec, hvec.back() + 1);  // Result hvec.size()
+
+  // Test other values - both missing and present
+  TestLowerBoundImpl(hvec, 3);  // Result 1
+  TestLowerBoundImpl(hvec, 4);  // Result 2
+  TestLowerBoundImpl(hvec, 5);  // Result 2
+}
+
+TEST(LowerBound, DataDescending) {
+  std::vector<int> hvec{10, 10, 9, 8, 7, 5, 5, 3, 0, 0};
+  const auto &comparator = thrust::greater<int>();
+
+  // Test boundary conditions
+  TestLowerBoundImpl(hvec, hvec.front(), comparator);  // Result 0
+  TestLowerBoundImpl(hvec, hvec.front() + 1, comparator);  // Result 0
+  TestLowerBoundImpl(hvec, hvec.back(), comparator);  // Result 8
+  TestLowerBoundImpl(hvec, hvec.back() - 1, comparator);  // Result hvec.size()
+
+  // Test other values - both missing and present
+  TestLowerBoundImpl(hvec, 9, comparator);  // Result 2
+  TestLowerBoundImpl(hvec, 7, comparator);  // Result 4
+  TestLowerBoundImpl(hvec, 4, comparator);  // Result 7
+  TestLowerBoundImpl(hvec, 8, comparator);  // Result 3
 }

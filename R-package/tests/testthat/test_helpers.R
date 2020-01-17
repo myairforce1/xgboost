@@ -142,6 +142,44 @@ test_that("predict feature contributions works", {
   }
 })
 
+test_that("SHAPs sum to predictions, with or without DART", {
+  d <- cbind(
+    x1 = rnorm(100),
+    x2 = rnorm(100),
+    x3 = rnorm(100))
+  y <- d[,"x1"] + d[,"x2"]^2 +
+    ifelse(d[,"x3"] > .5, d[,"x3"]^2, 2^d[,"x3"]) +
+    rnorm(100)
+  nrounds <- 30
+
+  for (booster in list("gbtree", "dart")) {
+    fit <- xgboost(
+      params = c(
+        list(
+          booster = booster,
+          objective = "reg:squarederror",
+          eval_metric = "rmse"),
+        if (booster == "dart")
+          list(rate_drop = .01, one_drop = T)),
+      data = d,
+      label = y,
+      nrounds = nrounds)
+
+    pr <- function(...)
+      predict(fit, newdata = d, ...)
+    pred <- pr()
+    shap <- pr(predcontrib = T)
+    shapi <- pr(predinteraction = T)
+    tol = 1e-5
+
+    expect_equal(rowSums(shap), pred, tol = tol)
+    expect_equal(apply(shapi, 1, sum), pred, tol = tol)
+    for (i in 1 : nrow(d))
+      for (f in list(rowSums, colSums))
+        expect_equal(f(shapi[i,,]), shap[i,], tol = tol)
+  }
+})
+
 test_that("xgb-attribute functionality", {
   val <- "my attribute value"
   list.val <- list(my_attr=val, a=123, b='ok')
@@ -163,6 +201,7 @@ test_that("xgb-attribute functionality", {
   # serializing:
   xgb.save(bst.Tree, 'xgb.model')
   bst <- xgb.load('xgb.model')
+  if (file.exists('xgb.model')) file.remove('xgb.model')
   expect_equal(xgb.attr(bst, "my_attr"), val)
   expect_equal(xgb.attributes(bst), list.ch)
   # deletion:
@@ -199,10 +238,12 @@ if (grepl('Windows', Sys.info()[['sysname']]) ||
 test_that("xgb.Booster serializing as R object works", {
   saveRDS(bst.Tree, 'xgb.model.rds')
   bst <- readRDS('xgb.model.rds')
+  if (file.exists('xgb.model.rds')) file.remove('xgb.model.rds')
   dtrain <- xgb.DMatrix(sparse_matrix, label = label)
   expect_equal(predict(bst.Tree, dtrain), predict(bst, dtrain), tolerance = float_tolerance)
   expect_equal(xgb.dump(bst.Tree), xgb.dump(bst))
   xgb.save(bst, 'xgb.model')
+  if (file.exists('xgb.model')) file.remove('xgb.model')
   nil_ptr <- new("externalptr")
   class(nil_ptr) <- "xgb.Booster.handle"
   expect_true(identical(bst$handle, nil_ptr))
