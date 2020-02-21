@@ -8,6 +8,7 @@
 #include <xgboost/data.h>
 #include "../common/random.h"
 #include "./simple_dmatrix.h"
+#include "../common/math.h"
 #include "device_adapter.cuh"
 
 namespace xgboost {
@@ -78,43 +79,75 @@ void CopyDataColumnMajor(AdapterT* adapter, common::Span<Entry> data,
   }
 }
 
+struct IsValidFunctor : public thrust::unary_function<Entry, bool> {
+  explicit IsValidFunctor(float missing) : missing(missing) {}
+
+  float missing;
+  __device__ bool operator()(const Entry& x) const {
+    return IsValid(x.fvalue, missing);
+  }
+};
+
+// Here the data is already correctly ordered and simply needs to be compacted
+// to remove missing data
+template <typename AdapterT>
+void CopyDataRowMajor(AdapterT* adapter, common::Span<Entry> data,
+                      int device_idx, float missing,
+                      common::Span<size_t> row_ptr) {
+  auto& batch = adapter->Value();
+  auto transform_f = [=] __device__(size_t idx) {
+    const auto& e = batch.GetElement(idx);
+    return Entry(e.column_idx, e.value);
+  };  // NOLINT
+  auto counting = thrust::make_counting_iterator(0llu);
+  thrust::transform_iterator<decltype(transform_f), decltype(counting), Entry>
+      transform_iter(counting, transform_f);
+  dh::XGBCachingDeviceAllocator<char> alloc;
+  thrust::copy_if(
+      thrust::cuda::par(alloc), transform_iter, transform_iter + batch.Size(),
+      thrust::device_pointer_cast(data.data()), IsValidFunctor(missing));
+}
+
 // Does not currently support metainfo as no on-device data source contains this
 // Current implementation assumes a single batch. More batches can
 // be supported in future. Does not currently support inferring row/column size
 template <typename AdapterT>
 SimpleDMatrix::SimpleDMatrix(AdapterT* adapter, float missing, int nthread) {
-  source_.reset(new SimpleCSRSource());
-  SimpleCSRSource& mat = *reinterpret_cast<SimpleCSRSource*>(source_.get());
   CHECK(adapter->NumRows() != kAdapterUnknownSize);
   CHECK(adapter->NumColumns() != kAdapterUnknownSize);
 
   adapter->BeforeFirst();
   adapter->Next();
   auto& batch = adapter->Value();
-  mat.page_.offset.SetDevice(adapter->DeviceIdx());
-  mat.page_.data.SetDevice(adapter->DeviceIdx());
+  sparse_page_.offset.SetDevice(adapter->DeviceIdx());
+  sparse_page_.data.SetDevice(adapter->DeviceIdx());
 
   // Enforce single batch
   CHECK(!adapter->Next());
-  mat.page_.offset.Resize(adapter->NumRows() + 1);
-  auto s_offset = mat.page_.offset.DeviceSpan();
+  sparse_page_.offset.Resize(adapter->NumRows() + 1);
+  auto s_offset = sparse_page_.offset.DeviceSpan();
   CountRowOffsets(batch, s_offset, adapter->DeviceIdx(), missing);
-  mat.info.num_nonzero_ = mat.page_.offset.HostVector().back();
-  mat.page_.data.Resize(mat.info.num_nonzero_);
+  info.num_nonzero_ = sparse_page_.offset.HostVector().back();
+  sparse_page_.data.Resize(info.num_nonzero_);
   if (adapter->IsRowMajor()) {
-    LOG(FATAL) << "Not implemented.";
+    CopyDataRowMajor(adapter, sparse_page_.data.DeviceSpan(),
+                        adapter->DeviceIdx(), missing, s_offset);
   } else {
-    CopyDataColumnMajor(adapter, mat.page_.data.DeviceSpan(),
+    CopyDataColumnMajor(adapter, sparse_page_.data.DeviceSpan(),
                         adapter->DeviceIdx(), missing, s_offset);
   }
+  // Sync
+  sparse_page_.data.HostVector();
 
-  mat.info.num_col_ = adapter->NumColumns();
-  mat.info.num_row_ = adapter->NumRows();
+  info.num_col_ = adapter->NumColumns();
+  info.num_row_ = adapter->NumRows();
   // Synchronise worker columns
-  rabit::Allreduce<rabit::op::Max>(&mat.info.num_col_, 1);
+  rabit::Allreduce<rabit::op::Max>(&info.num_col_, 1);
 }
 
 template SimpleDMatrix::SimpleDMatrix(CudfAdapter* adapter, float missing,
+                                      int nthread);
+template SimpleDMatrix::SimpleDMatrix(CupyAdapter* adapter, float missing,
                                       int nthread);
 }  // namespace data
 }  // namespace xgboost

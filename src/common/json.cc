@@ -1,6 +1,8 @@
 /*!
  * Copyright (c) by Contributors 2019
  */
+#include <cctype>
+#include <locale>
 #include <sstream>
 #include <limits>
 #include <cmath>
@@ -23,7 +25,7 @@ void JsonWriter::Visit(JsonArray const* arr) {
   for (size_t i = 0; i < size; ++i) {
     auto const& value = vec[i];
     this->Save(value);
-    if (i != size-1) { Write(", "); }
+    if (i != size-1) { Write(","); }
   }
   this->Write("]");
 }
@@ -37,7 +39,7 @@ void JsonWriter::Visit(JsonObject const* obj) {
   size_t size = obj->getObject().size();
 
   for (auto& value : obj->getObject()) {
-    this->Write("\"" + value.first + "\": ");
+    this->Write("\"" + value.first + "\":");
     this->Save(value.second);
 
     if (i != size-1) {
@@ -351,7 +353,9 @@ Json JsonReader::Parse() {
       return ParseObject();
     } else if ( c == '[' ) {
       return ParseArray();
-    } else if ( c == '-' || std::isdigit(c) ) {
+    } else if ( c == '-' || std::isdigit(c) ||
+                c == 'N' ) {
+      // For now we only accept `NaN`, not `nan` as the later violiates LR(1) with `null`.
       return ParseNumber();
     } else if ( c == '\"' ) {
       return ParseString();
@@ -547,6 +551,13 @@ Json JsonReader::ParseNumber() {
 
   // TODO(trivialfis): Add back all the checks for number
   bool negative = false;
+  if (XGBOOST_EXPECT(*p == 'N', false)) {
+    GetChar('N');
+    GetChar('a');
+    GetChar('N');
+    return Json(static_cast<Number::Float>(std::numeric_limits<float>::quiet_NaN()));
+  }
+
   if ('-' == *p) {
     ++p;
     negative = true;
@@ -630,13 +641,13 @@ Json JsonReader::ParseNumber() {
     // multiply zero by inf which gives nan.
     if (f != 0.0) {
       // Only use exp10 from libc on gcc+linux
-#if !defined(__GNUC__) || defined(_WIN32) || defined(__APPLE__)
+#if !defined(__GNUC__) || defined(_WIN32) || defined(__APPLE__) || !defined(__linux__)
 #define exp10(val) std::pow(10, (val))
-#endif  // !defined(__GNUC__) || defined(_WIN32) || defined(__APPLE__)
+#endif  // !defined(__GNUC__) || defined(_WIN32) || defined(__APPLE__) || !defined(__linux__)
       f *= exp10(exponent);
-#if !defined(__GNUC__) || defined(_WIN32) || defined(__APPLE__)
+#if !defined(__GNUC__) || defined(_WIN32) || defined(__APPLE__) || !defined(__linux__)
 #undef exp10
-#endif  // !defined(__GNUC__) || defined(_WIN32) || defined(__APPLE__)
+#endif  // !defined(__GNUC__) || defined(_WIN32) || defined(__APPLE__) || !defined(__linux__)
     }
   }
 
@@ -682,47 +693,23 @@ Json JsonReader::ParseBoolean() {
   return Json{JsonBoolean{result}};
 }
 
-// This is an ad-hoc solution for writing numeric value in standard way.  We need to add
-// a locale independent way of writing stream like `std::{from, to}_chars' from C++-17.
-// FIXME(trivialfis): Remove this.
-class GlobalCLocale {
-  std::locale ori_;
-
- public:
-  GlobalCLocale() : ori_{std::locale()} {
-    std::string const name {"C"};
-    try {
-      std::locale::global(std::locale(name.c_str()));
-    } catch (std::runtime_error const& e) {
-      LOG(FATAL) << "Failed to set locale: " << name;
-    }
-  }
-  ~GlobalCLocale() {
-    std::locale::global(ori_);
-  }
-};
-
 Json Json::Load(StringView str) {
-  GlobalCLocale guard;
   JsonReader reader(str);
   Json json{reader.Load()};
   return json;
 }
 
 Json Json::Load(JsonReader* reader) {
-  GlobalCLocale guard;
   Json json{reader->Load()};
   return json;
 }
 
 void Json::Dump(Json json, std::ostream *stream, bool pretty) {
-  GlobalCLocale guard;
   JsonWriter writer(stream, pretty);
   writer.Save(json);
 }
 
 void Json::Dump(Json json, std::string* str, bool pretty) {
-  GlobalCLocale guard;
   std::stringstream ss;
   JsonWriter writer(&ss, pretty);
   writer.Save(json);
