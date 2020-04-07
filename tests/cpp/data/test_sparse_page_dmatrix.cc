@@ -47,9 +47,6 @@ TEST(SparsePageDMatrix, ColAccess) {
   xgboost::DMatrix *dmat =
       xgboost::DMatrix::Load(tmp_file + "#" + tmp_file + ".cache", true, false);
 
-  EXPECT_EQ(dmat->GetColDensity(0), 1);
-  EXPECT_EQ(dmat->GetColDensity(1), 0.5);
-
   // Loop over the batches and assert the data is as expected
   for (auto const &col_batch : dmat->GetBatches<xgboost::SortedCSCPage>()) {
     EXPECT_EQ(col_batch.Size(), dmat->Info().num_col_);
@@ -266,8 +263,10 @@ TEST(SparsePageDMatrix, FromFile) {
   data::FileAdapter adapter(parser.get());
   dmlc::TemporaryDirectory tempdir;
   const std::string tmp_file = tempdir.path + "/simple.libsvm";
+
   data::SparsePageDMatrix dmat(
       &adapter, std::numeric_limits<float>::quiet_NaN(), -1, tmp_file, 1);
+  ASSERT_EQ(dmat.Info().num_col_, 5);
 
   for (auto &batch : dmat.GetBatches<SparsePage>()) {
     std::vector<bst_row_t> expected_offset(batch.Size() + 1);

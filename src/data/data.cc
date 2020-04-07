@@ -133,15 +133,17 @@ void MetaInfo::Clear() {
 /*
  * Binary serialization format for MetaInfo:
  *
- * | name        | type     | is_scalar | num_row | num_col | value           |
- * |-------------+----------+-----------+---------+---------+-----------------|
- * | num_row     | kUInt64  | True      | NA      |      NA | ${num_row_}     |
- * | num_col     | kUInt64  | True      | NA      |      NA | ${num_col_}     |
- * | num_nonzero | kUInt64  | True      | NA      |      NA | ${num_nonzero_} |
- * | labels      | kFloat32 | False     | ${size} |       1 | ${labels_}      |
- * | group_ptr   | kUInt32  | False     | ${size} |       1 | ${group_ptr_}   |
- * | weights     | kFloat32 | False     | ${size} |       1 | ${weights_}     |
- * | base_margin | kFloat32 | False     | ${size} |       1 | ${base_margin_} |
+ * | name               | type     | is_scalar | num_row | num_col | value                   |
+ * |--------------------+----------+-----------+---------+---------+-------------------------|
+ * | num_row            | kUInt64  | True      | NA      |      NA | ${num_row_}             |
+ * | num_col            | kUInt64  | True      | NA      |      NA | ${num_col_}             |
+ * | num_nonzero        | kUInt64  | True      | NA      |      NA | ${num_nonzero_}         |
+ * | labels             | kFloat32 | False     | ${size} |       1 | ${labels_}              |
+ * | group_ptr          | kUInt32  | False     | ${size} |       1 | ${group_ptr_}           |
+ * | weights            | kFloat32 | False     | ${size} |       1 | ${weights_}             |
+ * | base_margin        | kFloat32 | False     | ${size} |       1 | ${base_margin_}         |
+ * | labels_lower_bound | kFloat32 | False     | ${size} |       1 | ${labels_lower_bound__} |
+ * | labels_upper_bound | kFloat32 | False     | ${size} |       1 | ${labels_upper_bound__} |
  *
  * Note that the scalar fields (is_scalar=True) will have num_row and num_col missing.
  * Also notice the difference between the saved name and the name used in `SetInfo':
@@ -164,6 +166,10 @@ void MetaInfo::SaveBinary(dmlc::Stream *fo) const {
                   {weights_.Size(), 1}, weights_); ++field_cnt;
   SaveVectorField(fo, u8"base_margin", DataType::kFloat32,
                   {base_margin_.Size(), 1}, base_margin_); ++field_cnt;
+  SaveVectorField(fo, u8"labels_lower_bound", DataType::kFloat32,
+                  {labels_lower_bound_.Size(), 1}, labels_lower_bound_); ++field_cnt;
+  SaveVectorField(fo, u8"labels_upper_bound", DataType::kFloat32,
+                  {labels_upper_bound_.Size(), 1}, labels_upper_bound_); ++field_cnt;
 
   CHECK_EQ(field_cnt, kNumField) << "Wrong number of fields";
 }
@@ -195,6 +201,8 @@ void MetaInfo::LoadBinary(dmlc::Stream *fi) {
   LoadVectorField(fi, u8"group_ptr", DataType::kUInt32, &group_ptr_);
   LoadVectorField(fi, u8"weights", DataType::kFloat32, &weights_);
   LoadVectorField(fi, u8"base_margin", DataType::kFloat32, &base_margin_);
+  LoadVectorField(fi, u8"labels_lower_bound", DataType::kFloat32, &labels_lower_bound_);
+  LoadVectorField(fi, u8"labels_upper_bound", DataType::kFloat32, &labels_upper_bound_);
 }
 
 // try to load group information from file, if exists
@@ -268,8 +276,18 @@ void MetaInfo::SetInfo(const char* key, const void* dptr, DataType dtype, size_t
     for (size_t i = 1; i < group_ptr_.size(); ++i) {
       group_ptr_[i] = group_ptr_[i - 1] + group_ptr_[i];
     }
+  } else if (!std::strcmp(key, "label_lower_bound")) {
+    auto& labels = labels_lower_bound_.HostVector();
+    labels.resize(num);
+    DISPATCH_CONST_PTR(dtype, dptr, cast_dptr,
+                       std::copy(cast_dptr, cast_dptr + num, labels.begin()));
+  } else if (!std::strcmp(key, "label_upper_bound")) {
+    auto& labels = labels_upper_bound_.HostVector();
+    labels.resize(num);
+    DISPATCH_CONST_PTR(dtype, dptr, cast_dptr,
+                       std::copy(cast_dptr, cast_dptr + num, labels.begin()));
   } else {
-    LOG(FATAL) << "Unknown metainfo: " << key;
+    LOG(FATAL) << "Unknown key for MetaInfo: " << key;
   }
 }
 
@@ -409,25 +427,6 @@ DMatrix* DMatrix::Load(const std::string& uri,
   return dmat;
 }
 
-
-/*
-DMatrix* DMatrix::Create(std::unique_ptr<DataSource<SparsePage>>&& source,
-                         const std::string& cache_prefix) {
-  if (cache_prefix.length() == 0) {
-    // Data split mode is fixed to be row right now.
-    rabit::Allreduce<rabit::op::Max>(&source->info.num_col_, 1);
-    return new data::SimpleDMatrix(std::move(source));
-  } else {
-#if DMLC_ENABLE_STD_THREAD
-    return new data::SparsePageDMatrix(std::move(source), cache_prefix);
-#else
-    LOG(FATAL) << "External memory is not enabled in mingw";
-    return nullptr;
-#endif  // DMLC_ENABLE_STD_THREAD
-  }
-}
-*/
-
 template <typename AdapterT>
 DMatrix* DMatrix::Create(AdapterT* adapter, float missing, int nthread,
                          const std::string& cache_prefix,  size_t page_size ) {
@@ -462,6 +461,9 @@ template DMatrix* DMatrix::Create<data::FileAdapter>(
     const std::string& cache_prefix, size_t page_size);
 template DMatrix* DMatrix::Create<data::DMatrixSliceAdapter>(
     data::DMatrixSliceAdapter* adapter, float missing, int nthread,
+    const std::string& cache_prefix, size_t page_size);
+template DMatrix* DMatrix::Create<data::IteratorAdapter>(
+    data::IteratorAdapter* adapter, float missing, int nthread,
     const std::string& cache_prefix, size_t page_size);
 
 SparsePage SparsePage::GetTranspose(int num_columns) const {
@@ -544,15 +546,15 @@ uint64_t SparsePage::Push(const AdapterBatchT& batch, float missing, int nthread
     int tid = omp_get_thread_num();
     auto line = batch.GetLine(i);
     for (auto j = 0ull; j < line.Size(); j++) {
-      auto element = line.GetElement(j);
+      data::COOTuple element = line.GetElement(j);
       max_columns =
           std::max(max_columns, static_cast<uint64_t>(element.column_idx + 1));
       if (!common::CheckNAN(element.value) && element.value != missing) {
-        size_t key = element.row_idx -
-                     base_rowid;  // Adapter row index is absolute, here we want
-                                  // it relative to current page
+        size_t key = element.row_idx - base_rowid;
+        // Adapter row index is absolute, here we want it relative to
+        // current page
         CHECK_GE(key,  builder_base_row_offset);
-        builder.AddBudget(element.row_idx - base_rowid, tid);
+        builder.AddBudget(key, tid);
       }
     }
   }

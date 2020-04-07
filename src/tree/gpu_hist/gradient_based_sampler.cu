@@ -153,7 +153,8 @@ ExternalMemoryNoSampling::ExternalMemoryNoSampling(EllpackPageImpl* page,
                                                    size_t n_rows,
                                                    const BatchParam& batch_param)
     : batch_param_(batch_param),
-      page_(new EllpackPageImpl(batch_param.gpu_id, page->matrix.info, n_rows)) {}
+      page_(new EllpackPageImpl(batch_param.gpu_id, page->Cuts(), page->is_dense,
+                                page->row_stride, n_rows)) {}
 
 GradientBasedSample ExternalMemoryNoSampling::Sample(common::Span<GradientPair> gpair,
                                                      DMatrix* dmat) {
@@ -200,7 +201,6 @@ GradientBasedSample ExternalMemoryUniformSampling::Sample(common::Span<GradientP
 
   // Count the sampled rows.
   size_t sample_rows = thrust::count_if(dh::tbegin(gpair), dh::tend(gpair), IsNonZero());
-  size_t n_rows = dmat->Info().num_row_;
 
   // Compact gradient pairs.
   gpair_.resize(sample_rows);
@@ -217,9 +217,9 @@ GradientBasedSample ExternalMemoryUniformSampling::Sample(common::Span<GradientP
 
   // Create a new ELLPACK page with empty rows.
   page_.reset();  // Release the device memory first before reallocating
-  page_.reset(new EllpackPageImpl(batch_param_.gpu_id,
-                                  original_page_->matrix.info,
-                                  sample_rows));
+  page_.reset(new EllpackPageImpl(
+      batch_param_.gpu_id, original_page_->Cuts(), original_page_->is_dense,
+                                  original_page_->row_stride, sample_rows));
 
   // Compact the ELLPACK pages into the single sample page.
   thrust::fill(dh::tbegin(page_->gidx_buffer), dh::tend(page_->gidx_buffer), 0);
@@ -298,9 +298,9 @@ GradientBasedSample ExternalMemoryGradientBasedSampling::Sample(common::Span<Gra
 
   // Create a new ELLPACK page with empty rows.
   page_.reset();  // Release the device memory first before reallocating
-  page_.reset(new EllpackPageImpl(batch_param_.gpu_id,
-                                  original_page_->matrix.info,
-                                  sample_rows));
+  page_.reset(new EllpackPageImpl(batch_param_.gpu_id, original_page_->Cuts(),
+                                  original_page_->is_dense,
+                                  original_page_->row_stride, sample_rows));
 
   // Compact the ELLPACK pages into the single sample page.
   thrust::fill(dh::tbegin(page_->gidx_buffer), dh::tend(page_->gidx_buffer), 0);
@@ -319,7 +319,7 @@ GradientBasedSampler::GradientBasedSampler(EllpackPageImpl* page,
   monitor_.Init("gradient_based_sampler");
 
   bool is_sampling = subsample < 1.0;
-  bool is_external_memory = page->matrix.n_rows != n_rows;
+  bool is_external_memory = page->n_rows != n_rows;
 
   if (is_sampling) {
     switch (sampling_method) {

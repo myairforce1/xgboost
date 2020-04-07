@@ -23,6 +23,7 @@ class SimpleDMatrix : public DMatrix {
   explicit SimpleDMatrix(AdapterT* adapter, float missing, int nthread);
 
   explicit SimpleDMatrix(dmlc::Stream* in_stream);
+  ~SimpleDMatrix() override = default;
 
   void SaveToLocalFile(const std::string& fname);
 
@@ -30,9 +31,7 @@ class SimpleDMatrix : public DMatrix {
 
   const MetaInfo& Info() const override;
 
-  float GetColDensity(size_t cidx) override;
-
-  bool SingleColBlock() const override;
+  bool SingleColBlock() const override { return true; }
 
   /*! \brief magic number used to identify SimpleDMatrix binary files */
   static const int kMagic = 0xffffab01;
@@ -43,11 +42,19 @@ class SimpleDMatrix : public DMatrix {
   BatchSet<SortedCSCPage> GetSortedColumnBatches() override;
   BatchSet<EllpackPage> GetEllpackBatches(const BatchParam& param) override;
 
-  MetaInfo info;
+  MetaInfo info_;
   SparsePage sparse_page_;  // Primary storage type
   std::unique_ptr<CSCPage> column_page_;
   std::unique_ptr<SortedCSCPage> sorted_column_page_;
   std::unique_ptr<EllpackPage> ellpack_page_;
+  BatchParam batch_param_;
+
+  bool EllpackExists() const override {
+    return static_cast<bool>(ellpack_page_);
+  }
+  bool SparsePageExists() const override {
+    return true;
+  }
 };
 }  // namespace data
 }  // namespace xgboost

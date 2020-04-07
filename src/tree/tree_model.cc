@@ -14,6 +14,7 @@
 #include <limits>
 #include <cmath>
 #include <iomanip>
+#include <stack>
 
 #include "param.h"
 #include "../common/common.h"
@@ -86,7 +87,7 @@ class TreeGenerator {
     auto const split_index = tree[nid].SplitIndex();
     std::string result;
     if (split_index < fmap_.Size()) {
-      switch (fmap_.type(split_index)) {
+      switch (fmap_.TypeOf(split_index)) {
         case FeatureMap::kIndicator: {
           result = this->Indicator(tree, nid, depth);
           break;
@@ -535,7 +536,7 @@ class GraphvizGenerator : public TreeGenerator {
         "    {nid} [ label=\"{fname}{<}{cond}\" {params}]\n";
 
     // Indicator only has fname.
-    bool has_less = (split >= fmap_.Size()) || fmap_.type(split) != FeatureMap::kIndicator;
+    bool has_less = (split >= fmap_.Size()) || fmap_.TypeOf(split) != FeatureMap::kIndicator;
     std::string result = SuperT::Match(kNodeTemplate, {
         {"{nid}",    std::to_string(nid)},
         {"{fname}",  split < fmap_.Size() ? fmap_.Name(split) :
@@ -618,6 +619,32 @@ std::string RegTree::DumpModel(const FeatureMap& fmap,
   return result;
 }
 
+bool RegTree::Equal(const RegTree& b) const {
+  if (NumExtraNodes() != b.NumExtraNodes()) {
+    return false;
+  }
+
+  std::stack<bst_node_t> nodes;
+  nodes.push(0);
+  auto& self = *this;
+  while (!nodes.empty()) {
+    auto nid = nodes.top();
+    nodes.pop();
+    if (!(self.nodes_.at(nid) == b.nodes_.at(nid))) {
+      return false;
+    }
+    auto left = self[nid].LeftChild();
+    auto right = self[nid].RightChild();
+    if (left != RegTree::kInvalidNodeId) {
+      nodes.push(left);
+    }
+    if (right != RegTree::kInvalidNodeId) {
+      nodes.push(right);
+    }
+  }
+  return true;
+}
+
 void RegTree::Load(dmlc::Stream* fi) {
   CHECK_EQ(fi->Read(&param, sizeof(TreeParam)), sizeof(TreeParam));
   nodes_.resize(param.num_nodes);
@@ -647,7 +674,7 @@ void RegTree::Save(dmlc::Stream* fo) const {
 }
 
 void RegTree::LoadModel(Json const& in) {
-  fromJson(in["tree_param"], &param);
+  FromJson(in["tree_param"], &param);
   auto n_nodes = param.num_nodes;
   CHECK_NE(n_nodes, 0);
   // stats
@@ -673,6 +700,9 @@ void RegTree::LoadModel(Json const& in) {
   auto const& default_left = get<Array const>(in["default_left"]);
   CHECK_EQ(default_left.size(), n_nodes);
 
+  stats_.clear();
+  nodes_.clear();
+
   stats_.resize(n_nodes);
   nodes_.resize(n_nodes);
   for (int32_t i = 0; i < n_nodes; ++i) {
@@ -692,12 +722,18 @@ void RegTree::LoadModel(Json const& in) {
     n = Node{left, right, parent, ind, cond, dft_left};
   }
 
-
-  deleted_nodes_.resize(0);
+  deleted_nodes_.clear();
   for (bst_node_t i = 1; i < param.num_nodes; ++i) {
     if (nodes_[i].IsDeleted()) {
       deleted_nodes_.push_back(i);
     }
+  }
+
+  auto& self = *this;
+  for (auto nid = 1; nid < n_nodes; ++nid) {
+    auto parent = self[nid].Parent();
+    CHECK_NE(parent, RegTree::kInvalidNodeId);
+    self[nid].SetParent(self[nid].Parent(), self[parent].LeftChild() == nid);
   }
   CHECK_EQ(static_cast<bst_node_t>(deleted_nodes_.size()), param.num_deleted);
 }
@@ -706,7 +742,7 @@ void RegTree::SaveModel(Json* p_out) const {
   auto& out = *p_out;
   CHECK_EQ(param.num_nodes, static_cast<int>(nodes_.size()));
   CHECK_EQ(param.num_nodes, static_cast<int>(stats_.size()));
-  out["tree_param"] = toJson(param);
+  out["tree_param"] = ToJson(param);
   CHECK_EQ(get<String>(out["tree_param"]["num_nodes"]), std::to_string(param.num_nodes));
   using I = Integer::Int;
   auto n_nodes = param.num_nodes;
@@ -792,7 +828,7 @@ void RegTree::CalculateContributionsApprox(const RegTree::FVec &feat,
   bst_node_t nid = 0;
   while (!(*this)[nid].IsLeaf()) {
     split_index = (*this)[nid].SplitIndex();
-    nid = this->GetNext(nid, feat.Fvalue(split_index), feat.IsMissing(split_index));
+    nid = this->GetNext(nid, feat.GetFvalue(split_index), feat.IsMissing(split_index));
     bst_float new_value = this->node_mean_values_[nid];
     // update feature weight
     out_contribs[split_index] += new_value - node_value;
@@ -924,7 +960,7 @@ void RegTree::TreeShap(const RegTree::FVec &feat, bst_float *phi,
     unsigned hot_index = 0;
     if (feat.IsMissing(split_index)) {
       hot_index = node.DefaultChild();
-    } else if (feat.Fvalue(split_index) < node.SplitCond()) {
+    } else if (feat.GetFvalue(split_index) < node.SplitCond()) {
       hot_index = node.LeftChild();
     } else {
       hot_index = node.RightChild();

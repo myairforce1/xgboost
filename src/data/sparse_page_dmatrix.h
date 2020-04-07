@@ -30,16 +30,13 @@ class SparsePageDMatrix : public DMatrix {
     row_source_.reset(new data::SparsePageSource(adapter, missing, nthread,
                                                  cache_prefix, page_size));
   }
-  // Set number of threads but keep old value so we can reset it after
   ~SparsePageDMatrix() override = default;
 
   MetaInfo& Info() override;
 
   const MetaInfo& Info() const override;
 
-  float GetColDensity(size_t cidx) override;
-
-  bool SingleColBlock() const override;
+  bool SingleColBlock() const override { return false; }
 
  private:
   BatchSet<SparsePage> GetRowBatches() override;
@@ -58,6 +55,13 @@ class SparsePageDMatrix : public DMatrix {
   std::string cache_info_;
   // Store column densities to avoid recalculating
   std::vector<float> col_density_;
+
+  bool EllpackExists() const override {
+    return static_cast<bool>(ellpack_source_);
+  }
+  bool SparsePageExists() const override {
+    return static_cast<bool>(row_source_);
+  }
 };
 }  // namespace data
 }  // namespace xgboost
